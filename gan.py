@@ -15,12 +15,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 from copy import deepcopy
-
+from sampler import subsample_dataset, append_dataset
 
 os.makedirs('images', exist_ok=True)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--n_epochs', type=int, default=5000, help='number of epochs of training')
+parser.add_argument('--n_epochs', type=int, default=50000, help='number of epochs of training')
 parser.add_argument('--batch_size', type=int, default=10, help='size of the batches')
 parser.add_argument('--lr', type=float, default=0.0001, help='adam: learning rate')
 parser.add_argument('--b1', type=float, default=0.5, help='adam: decay of first order momentum of gradient')
@@ -34,55 +34,10 @@ opt = parser.parse_args()
 print(opt)
 
 img_shape = (opt.channels, opt.img_size, opt.img_size)
+print(img_shape)
+# print(np.prod(img_shape))
 
 cuda = True if torch.cuda.is_available() else False
-
-
-def subsample_dataset(train_dataset):
-    """
-    :param train_dataset:
-    :return: subsampled dataset, where the dataset is imbalance
-    """
-
-    # get the feature and labels and transform to numpy
-    train_dataset_subsample = deepcopy(train_dataset)
-    feature = train_dataset.train_data.numpy()
-    labels = train_dataset.train_labels.numpy()
-
-    # get the label set
-    labels_set = list(set(labels))
-    # chosen_labels = np.random.choice(labels_set, 5, replace=False)
-    chosen_labels = [0, 1, 2, 3, 4]
-    print(chosen_labels)
-    feature_resample = []
-    labels_resample = []
-
-    for label_idx in labels_set:
-        if label_idx in chosen_labels:
-            index = np.where(labels == label_idx)[0]
-            index = np.random.choice(index, 50, replace=False)
-
-            if len(feature_resample) == 0:
-                feature_resample = feature[index]
-                labels_resample = labels[index]
-            else:
-                feature_resample = np.concatenate((feature_resample, feature[index]), axis=0)
-                labels_resample = np.concatenate((labels_resample, labels[index]), axis=0)
-        # else:
-            # index = np.where(labels == label_idx)[0]
-            #
-            # if len(feature_resample) == 0:
-            #     feature_resample = feature[index]
-            #     labels_resample = labels[index]
-            # else:
-            #     feature_resample = np.concatenate((feature_resample, feature[index]), axis=0)
-            #     labels_resample = np.concatenate((labels_resample, labels[index]), axis=0)
-    feature_resample = torch.from_numpy(feature_resample)
-    labels_resample = torch.from_numpy(labels_resample)
-
-    train_dataset_subsample.train_data = feature_resample
-    train_dataset_subsample.train_labels = labels_resample
-    return train_dataset_subsample
 
 
 class Generator(nn.Module):
@@ -110,6 +65,7 @@ class Generator(nn.Module):
         img = img.view(img.size(0), *img_shape)
         return img
 
+
 class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
@@ -129,87 +85,140 @@ class Discriminator(nn.Module):
 
         return validity
 
-# Loss function
-adversarial_loss = torch.nn.BCELoss()
-
-# Initialize generator and discriminator
-generator = Generator()
-discriminator = Discriminator()
-
-if cuda:
-    generator.cuda()
-    discriminator.cuda()
-    adversarial_loss.cuda()
 
 # Configure data loader
-os.makedirs('../../data/mnist', exist_ok=True)
 
 train_dataset = MNIST('../data/MNIST', train=True, download=True,
-                             transform=transforms.Compose([
-                                 transforms.ToTensor(),
-                                 # transforms.Normalize((0.1307,), (0.3081,))
-                                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-                             ]))
+                      transform=transforms.Compose([
+                          transforms.ToTensor(),
+                          # transforms.Normalize((0.1307,), (0.3081,))
+                          transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+                      ]))
 
-train_dataset_sampled = subsample_dataset(train_dataset)
+train_dataset_sampled = subsample_dataset(train_dataset, 0)
 
 dataloader = torch.utils.data.DataLoader(train_dataset_sampled, batch_size=opt.batch_size, shuffle=True)
 
-# Optimizers
-optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
-optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
 
-Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
+def generate_gan_model(train_dataset, parser, cuda, num_generate, label):
+    train_dataset_sampled = subsample_dataset(train_dataset, label)
 
-# ----------
-#  Training
-# ----------
+    dataloader = torch.utils.data.DataLoader(train_dataset_sampled, batch_size=opt.batch_size, shuffle=True)
 
-for epoch in range(opt.n_epochs):
-    for i, (imgs, _) in enumerate(dataloader):
+    train_dataset_generate = deepcopy(train_dataset_sampled)
+    feature = train_dataset_generate.train_data.numpy()
+    labels = train_dataset_generate.train_labels.numpy()
 
-        # Adversarial ground truths
-        valid = Variable(Tensor(imgs.size(0), 1).fill_(1.0), requires_grad=False)
-        fake = Variable(Tensor(imgs.size(0), 1).fill_(0.0), requires_grad=False)
+    # Initialize generator and discriminator
+    generator = Generator()
+    discriminator = Discriminator()
 
-        # Configure input
-        real_imgs = Variable(imgs.type(Tensor))
+    # Loss function
+    adversarial_loss = torch.nn.BCELoss()
 
-        # -----------------
-        #  Train Generator
-        # -----------------
+    if cuda:
+        generator.cuda()
+        discriminator.cuda()
+        adversarial_loss.cuda()
 
-        optimizer_G.zero_grad()
+    # ----------
+    #  Training
+    # ----------
 
+    # Optimizers
+    optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+    optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+
+    Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
+
+    for epoch in range(parser.n_epochs):
+        for i, (imgs, _) in enumerate(dataloader):
+
+            # Adversarial ground truths
+            valid = Variable(Tensor(imgs.size(0), 1).fill_(1.0), requires_grad=False)
+            fake = Variable(Tensor(imgs.size(0), 1).fill_(0.0), requires_grad=False)
+
+            # Configure input
+            real_imgs = Variable(imgs.type(Tensor))
+
+            # -----------------
+            #  Train Generator
+            # -----------------
+
+            optimizer_G.zero_grad()
+
+            # Sample noise as generator input
+            z = Variable(Tensor(np.random.normal(0, 1, (imgs.shape[0], parser.latent_dim))))
+            print("shape z: ", imgs.shape[0])
+
+            # Generate a batch of images
+            gen_imgs = generator(z)
+
+            # Loss measures generator's ability to fool the discriminator
+            g_loss = adversarial_loss(discriminator(gen_imgs), valid)
+
+            g_loss.backward()
+            optimizer_G.step()
+
+            # ---------------------
+            #  Train Discriminator
+            # ---------------------
+
+            optimizer_D.zero_grad()
+
+            # Measure discriminator's ability to classify real from generated samples
+            real_loss = adversarial_loss(discriminator(real_imgs), valid)
+            fake_loss = adversarial_loss(discriminator(gen_imgs.detach()), fake)
+            d_loss = (real_loss + fake_loss) / 2
+
+            d_loss.backward()
+            optimizer_D.step()
+
+            print("[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f]" % (epoch, parser.n_epochs, i, len(dataloader),
+                                                                             d_loss.item(), g_loss.item()))
+
+            batches_done = epoch * len(dataloader) + i
+            if batches_done % parser.sample_interval == 0:
+                save_image(gen_imgs.data[:25], 'images/%d.png' % batches_done, nrow=5, normalize=True)
+
+    feature_new = []
+    label_new = []
+
+    for idx in range(num_generate):
         # Sample noise as generator input
-        z = Variable(Tensor(np.random.normal(0, 1, (imgs.shape[0], opt.latent_dim))))
-
+        z = Variable(Tensor(np.random.normal(0, 1, (opt.batch_size, opt.latent_dim))))
         # Generate a batch of images
         gen_imgs = generator(z)
+        save_image(gen_imgs.data, 'images/gan_%d.png' % idx, nrow=5, normalize=True)
+        gen_imgs = gen_imgs.data.cpu().numpy()
 
-        # Loss measures generator's ability to fool the discriminator
-        g_loss = adversarial_loss(discriminator(gen_imgs), valid)
+        feature_new.append(gen_imgs[:, 0])
+        label_new.append(np.asarray([labels[0]] * gen_imgs.shape[0]))
+    feature_new = np.concatenate(feature_new)
+    label_new = np.concatenate(label_new)
+    assert feature_new.shape[0] == label_new.shape[0]
+    feature = np.concatenate((feature, feature_new))
+    labels = np.concatenate((labels, label_new))
 
-        g_loss.backward()
-        optimizer_G.step()
+    return feature, labels
 
-        # ---------------------
-        #  Train Discriminator
-        # ---------------------
 
-        optimizer_D.zero_grad()
+# training
+print("training")
+num_generate = 95
+label = 0
+feature_merge = []
+labels_merge = []
 
-        # Measure discriminator's ability to classify real from generated samples
-        real_loss = adversarial_loss(discriminator(real_imgs), valid)
-        fake_loss = adversarial_loss(discriminator(gen_imgs.detach()), fake)
-        d_loss = (real_loss + fake_loss) / 2
+feature, labels = generate_gan_model(train_dataset, opt, cuda, num_generate, label)
 
-        d_loss.backward()
-        optimizer_D.step()
+feature_merge.append(feature)
+labels_merge.append(labels)
+feature_merge = np.concatenate(feature_merge)
+labels_merge = np.concatenate(labels_merge)
 
-        print ("[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f]" % (epoch, opt.n_epochs, i, len(dataloader),
-                                                            d_loss.item(), g_loss.item()))
-
-        batches_done = epoch * len(dataloader) + i
-        if batches_done % opt.sample_interval == 0:
-            save_image(gen_imgs.data[:25], 'images/%d.png' % batches_done, nrow=5, normalize=True)
+print(feature_merge.shape)
+print(labels_merge.shape)
+# train_dataset = append_dataset(train_dataset_sampled, feature, labels)
+#
+# print(train_dataset)
